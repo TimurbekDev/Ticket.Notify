@@ -52,6 +52,8 @@ export async function makeRequest(date) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
 
+        console.log(response);
+        
         const data = await response.json();
         // console.log("Response Data:", data.express.direction);
         return data.express.direction
