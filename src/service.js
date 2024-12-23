@@ -1,3 +1,10 @@
+// Helper function to delay execution
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Configure retry settings
+const RETRY_DELAYS = [1000, 2000, 5000]; // Delays in milliseconds
+const MAX_RETRIES = 3;
+
 // Define the API URL
 const url = "https://eticket.railway.uz/api/v3/trains/availability/space/between/stations";
 
@@ -26,6 +33,7 @@ const headers = {
     "x-xsrf-token": "53dfa106-7c63-47af-ad52-e3ac37699706"
   };
   
+
 // Create the request payload
 const payload = (date) => ({
     detailNumPlaces: 1,
@@ -39,27 +47,80 @@ const payload = (date) => ({
     showWithoutPlaces: 0,
     stationFrom: "2900000",
     stationTo: "2900885",
-})
+});
 
-// Define the function to make the API request
+// Request queue to manage concurrent requests
+let requestQueue = [];
+const MAX_CONCURRENT_REQUESTS = 2;
+let activeRequests = 0;
+
+// Semaphore for rate limiting
+const acquireRequest = async () => {
+    while (activeRequests >= MAX_CONCURRENT_REQUESTS) {
+        await delay(100);
+    }
+    activeRequests++;
+};
+
+const releaseRequest = () => {
+    activeRequests--;
+};
+
+// Define the function to make the API request with retries
 export async function makeRequest(date) {
+    let lastError;
+    
+    // Wait for available slot in request queue
+    await acquireRequest();
+    
     try {
-        const response = await fetch(url, {
-            method: "POST",
-            headers: headers,
-            body: JSON.stringify(payload(date)),
-        });
+        for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+            try {
+                const response = await fetch(url, {
+                    method: "POST",
+                    headers: headers,
+                    body: JSON.stringify(payload(date)),
+                });
 
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
+                if (response.status === 429) {
+                    const retryAfter = response.headers.get('Retry-After');
+                    const waitTime = retryAfter ? parseInt(retryAfter) * 1000 : RETRY_DELAYS[attempt];
+                    console.log(`Rate limited. Waiting ${waitTime}ms before retry...`);
+                    await delay(waitTime);
+                    continue;
+                }
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const data = await response.json();
+                return data.express.direction;
+
+            } catch (error) {
+                lastError = error;
+                if (attempt < MAX_RETRIES - 1) {
+                    const waitTime = RETRY_DELAYS[attempt];
+                    console.log(`Attempt ${attempt + 1} failed. Retrying in ${waitTime}ms...`);
+                    await delay(waitTime);
+                }
+            }
         }
-
-        console.log(response);
         
-        const data = await response.json();
-        // console.log("Response Data:", data.express.direction);
-        return data.express.direction
+        throw lastError || new Error('All retry attempts failed');
+        
+    } finally {
+        releaseRequest();
+    }
+}
+
+// Example usage with multiple requests
+export async function makeMultipleRequests(dates) {
+    try {
+        const promises = dates.map(date => makeRequest(date));
+        return await Promise.all(promises);
     } catch (error) {
-        console.error("Error:", error);
+        console.error("Error making multiple requests:", error);
+        throw error;
     }
 }
